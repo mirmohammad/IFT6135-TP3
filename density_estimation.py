@@ -10,9 +10,9 @@ from __future__ import print_function
 
 import math
 
-import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
+from torch.autograd import Variable
 from tqdm import tqdm
 
 from samplers import *
@@ -23,28 +23,6 @@ device = torch.device('cuda:0' if cuda else 'cpu')
 tqdm.write('CUDA is not available!' if not cuda else 'CUDA is available!')
 tqdm.write('')
 
-# plot p0 and p1
-plt.figure()
-
-# empirical
-xx = torch.randn(10000)
-f = lambda x: torch.tanh(x * 2 + 1) + x * 0.75
-d = lambda x: (1 - torch.tanh(x * 2 + 1) ** 2) * 2 + 0.75  # closures
-plt.hist(f(xx), 100, alpha=0.5, density=1)
-plt.hist(xx, 100, alpha=0.5, density=1)
-plt.xlim(-5, 5)
-# exact
-xx = np.linspace(-5, 5, 1000)
-N = lambda x: np.exp(-x ** 2 / 2.) / ((2 * np.pi) ** 0.5)
-plt.plot(f(torch.from_numpy(xx)).numpy(), d(torch.from_numpy(xx)).numpy() ** (-1) * N(xx))
-plt.plot(xx, N(xx))
-
-
-############### import the sampler ``samplers.distribution4'' 
-############### train a discriminator on distribution4 and standard gaussian
-############### estimate the density of distribution4
-
-#######--- INSERT YOUR CODE BELOW ---#######
 
 # Jensen Shannon Divergence Loss Function
 class JSDLoss(nn.Module):
@@ -62,7 +40,7 @@ class WDLoss(nn.Module):
         self._lambda = _lambda
 
     def forward(self, t_x, t_y, t_z):
-        return -(torch.mean(t_x) - torch.mean(t_y) + self._lambda * torch.mean(torch.norm(t_y.grad - 1, 2)))
+        return -(torch.mean(t_x) - torch.mean(t_y) - self._lambda * torch.mean((torch.norm(t_z, dim=1) - 1).pow(2)))
 
 
 # MLP for Discriminator
@@ -78,10 +56,14 @@ class Discriminator(nn.Module):
         layers[-1] = activation_func
         self.disc = nn.Sequential(*layers)
 
-    def forward(self, x, y):
+    def reset_parameters(self):
+        for layer in self.disc:
+            if isinstance(layer, nn.Linear):
+                layer.reset_parameters()
+
+    def forward(self, x):
         d_x = self.disc(x)
-        d_y = self.disc(y)
-        return d_x, d_y
+        return d_x
 
 
 def iterate(epoch, model, criterion, optimizer, total_samples, x_sampler, y_sampler, theta, mode='train'):
@@ -98,12 +80,16 @@ def iterate(epoch, model, criterion, optimizer, total_samples, x_sampler, y_samp
         x_tensor = torch.Tensor(next(x_sampler)).to(device)
         y_tensor = torch.Tensor(next(y_sampler)).to(device)
 
-        d_x, d_y = model(x_tensor, y_tensor)
+        d_x = model(x_tensor)
+        d_y = model(y_tensor)
 
         if isinstance(criterion, WDLoss):
             z_sampler = iter(distribution1(0))
-            z_tensor = nn.Variable(torch.Tensor(next(z_sampler)[1]).to(device))
-            loss = criterion(d_x, d_y, z_tensor)
+            z_tensor = Variable(torch.Tensor(next(z_sampler)), requires_grad=True).to(device)
+            d_z = model(z_tensor)
+            gradients = torch.autograd.grad(outputs=d_z, inputs=z_tensor, grad_outputs=torch.ones(d_z.size()).cuda(),
+                                            create_graph=True, retain_graph=True)[0]
+            loss = criterion(d_x, d_y, gradients)
         else:
             loss = criterion(d_x, d_y)
 
@@ -125,45 +111,53 @@ if __name__ == '__main__':
 
     # Configuration
     learning_rate = 1e-3
-    batch_size = 512
+    batch_size = 64
     hidden_size = [512, 512]
 
-
-    total_samples = 4096
-    epochs = 1
+    total_samples = 2048
+    epochs = 100
 
     thetas = np.arange(-1, 1.1, 0.1)
 
     # Init model
-    activation = nn.Sigmoid()
+    activation = nn.ReLU()
     model = Discriminator(input_dim=2, hidden_size=hidden_size, activation_func=activation)
-    criterion = JSDLoss()
+    # criterion = JSDLoss()
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
 
     # CUDA
     model = model.to(device)
 
-    jsd_losses = []
-    for idx, theta in enumerate(thetas):
+    # Question 1
 
-        # Samplers
-        iter_dist_x = iter(distribution1(0, batch_size=batch_size))
-        # Create a list of distribution from theta=-1 to +1
-        iter_dist_y = iter(distribution1(theta, batch_size=batch_size))
-
-        jsd_losses.append([])
-        for epoch in range(epochs):
-            train_loss = iterate(epoch, model, criterion, optimizer, total_samples, iter_dist_x, iter_dist_y, theta,
-                                 mode='train')
-            valid_loss = iterate(epoch, model, criterion, optimizer, 32, iter_dist_x, iter_dist_y, theta,
-                                 mode='valid')
-            jsd_losses[idx].append(train_loss)
+    # jsd_losses = []
+    # for idx, theta in enumerate(thetas):
+    #
+    #     model.reset_parameters()
+    #     optimizer.zero_grad()
+    #
+    #     # Samplers
+    #     iter_dist_x = iter(distribution1(0, batch_size=batch_size))
+    #     # Create a list of distribution from theta=-1 to +1
+    #     iter_dist_y = iter(distribution1(theta, batch_size=batch_size))
+    #
+    #     jsd_losses.append([])
+    #     for epoch in range(epochs):
+    #         train_loss = iterate(epoch, model, criterion, optimizer, total_samples, iter_dist_x, iter_dist_y, theta,
+    #                              mode='train')
+    #         valid_loss = iterate(epoch, model, criterion, optimizer, 32, iter_dist_x, iter_dist_y, theta,
+    #                              mode='valid')
+    #         jsd_losses[idx].append(train_loss)
 
     # Question 2
 
     criterion = WDLoss(10)
     wd_losses = []
     for idx, theta in enumerate(thetas):
+
+        model.reset_parameters()
+        optimizer.zero_grad()
+
         # Samplers
         iter_dist_x = iter(distribution1(0, batch_size=batch_size))
         # Create a list of distribution from theta=-1 to +1
@@ -171,29 +165,8 @@ if __name__ == '__main__':
 
         wd_losses.append([])
         for epoch in range(epochs):
-            train_loss = iterate(epoch, model, criterion, optimizer, total_samples, iter_dist_x, iter_dist_y,
+            train_loss = iterate(epoch, model, criterion, optimizer, total_samples, iter_dist_x, iter_dist_y, theta,
+                                 mode='train')
+            valid_loss = iterate(epoch, model, criterion, optimizer, 32, iter_dist_x, iter_dist_y, theta,
                                  mode='valid')
-            jsd_losses[idx].append(train_loss)
-
-    print(jsd_losses)
-    print()
-    print(wd_losses)
-
-############### plotting things
-############### (1) plot the output of your trained discriminator 
-############### (2) plot the estimated density contrasted with the true density
-
-
-r = xx  # evaluate xx using your discriminator; replace xx with the output
-plt.figure(figsize=(8, 4))
-plt.subplot(1, 2, 1)
-plt.plot(xx, r)
-plt.title(r'$D(x)$')
-
-estimate = np.ones_like(xx) * 0.2  # estimate the density of distribution4 (on xx) using the discriminator;
-# replace "np.ones_like(xx)*0." with your estimate
-plt.subplot(1, 2, 2)
-plt.plot(xx, estimate)
-plt.plot(f(torch.from_numpy(xx)).numpy(), d(torch.from_numpy(xx)).numpy() ** (-1) * N(xx))
-plt.legend(['Estimated', 'True'])
-plt.title('Estimated vs True')
+            wd_losses[idx].append(train_loss)
